@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(cuid())
+  account      String        @unique
+  passwordHash String
+  displayName  String
+  avatarPath   String?
+  role         String        @default("USER")
+  albums       Album[]
+  photos       Photo[]
+  tags         Tag[]
+  settings     UserSetting[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Album {
+  id           String   @id @default(cuid())
+  ownerId      String
+  owner        User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  coverPhotoId String?
+  photos       Photo[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
+}
+
+model Photo {
+  id               String         @id @default(cuid())
+  ownerId          String
+  owner            User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  albumId          String?
+  album            Album?         @relation(fields: [albumId], references: [id], onDelete: SetNull)
+  title            String?
+  note             String?
+  originalName     String
+  currentVersionNo Int            @default(1)
+  sourcePhotoId    String?
+  versions         PhotoVersion[]
+  tags             PhotoTag[]
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([ownerId, albumId])
+  @@index([ownerId, createdAt])
+}
+
+model PhotoVersion {
+  id          String   @id @default(cuid())
+  photoId     String
+  photo       Photo    @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  versionNo   Int
+  kind        String
+  storedPath  String
+  mimeType    String
+  size        Int
+  width       Int
+  height      Int
+  editorState String?
+  createdAt   DateTime @default(now())
+
+  @@unique([photoId, versionNo])
+  @@index([photoId])
+}
+
+model Tag {
+  id      String     @id @default(cuid())
+  ownerId String
+  owner   User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name    String
+  color   String?
+  photos  PhotoTag[]
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
+}
+
+model PhotoTag {
+  photoId String
+  tagId   String
+  photo   Photo  @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([photoId, tagId])
+  @@index([tagId])
+}
+
+model UserSetting {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key       String
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, key])
+}

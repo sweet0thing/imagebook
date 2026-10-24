@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# Nuxt and build output
+.nuxt/
+.output/
+.data/
+.nitro/
+.cache/
+.turbo/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data and uploaded files
+data/
+storage/
+
+# Local tools
+.tools/
+
+# Logs
+logs/
+*.log
+
+# Python and PyInstaller
+__pycache__/
+*.py[cod]
+.pyinstaller/*
+!.pyinstaller/ImageBook.spec
+.venv/
+venv/
+/*.spec
+/ImageBook.exe
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
