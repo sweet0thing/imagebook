@@ -18,6 +18,9 @@ APP_NAME = "ImageBook"
 CONDA_ENV = "imagebook"
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+TH32CS_SNAPTHREAD = 0x00000004
+THREAD_SUSPEND_RESUME = 0x0002
+CREATE_SUSPENDED = 0x00000004
 
 
 class IoCounters(ctypes.Structure):
@@ -52,6 +55,18 @@ class JobExtendedLimitInformation(ctypes.Structure):
     ]
 
 
+class ThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ("cntSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ThreadID", wintypes.DWORD),
+        ("th32OwnerProcessID", wintypes.DWORD),
+        ("tpBasePri", wintypes.LONG),
+        ("tpDeltaPri", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
 KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
 KERNEL32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
 KERNEL32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -61,6 +76,16 @@ KERNEL32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
 KERNEL32.AssignProcessToJobObject.restype = wintypes.BOOL
 KERNEL32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
 KERNEL32.TerminateJobObject.restype = wintypes.BOOL
+KERNEL32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+KERNEL32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+KERNEL32.Thread32First.restype = wintypes.BOOL
+KERNEL32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+KERNEL32.Thread32Next.restype = wintypes.BOOL
+KERNEL32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+KERNEL32.OpenThread.restype = wintypes.HANDLE
+KERNEL32.ResumeThread.argtypes = [wintypes.HANDLE]
+KERNEL32.ResumeThread.restype = wintypes.DWORD
 KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
 KERNEL32.CloseHandle.restype = wintypes.BOOL
 
@@ -84,6 +109,31 @@ class WindowsJob:
 
     def close(self):
         KERNEL32.CloseHandle(self.handle)
+
+
+def resume_process(process_id):
+    snapshot = KERNEL32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snapshot == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    entry = ThreadEntry32()
+    entry.cntSize = ctypes.sizeof(entry)
+    try:
+        has_thread = KERNEL32.Thread32First(snapshot, ctypes.byref(entry))
+        while has_thread:
+            if entry.th32OwnerProcessID == process_id:
+                thread = KERNEL32.OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if not thread:
+                    raise OSError(ctypes.get_last_error(), "OpenThread failed")
+                try:
+                    if KERNEL32.ResumeThread(thread) == 0xFFFFFFFF:
+                        raise OSError(ctypes.get_last_error(), "ResumeThread failed")
+                    return
+                finally:
+                    KERNEL32.CloseHandle(thread)
+            has_thread = KERNEL32.Thread32Next(snapshot, ctypes.byref(entry))
+        raise OSError(f"未找到进程 {process_id} 的主线程。")
+    finally:
+        KERNEL32.CloseHandle(snapshot)
 
 
 class ImageBookLauncher(tk.Tk):
@@ -207,17 +257,23 @@ class ImageBookLauncher(tk.Tk):
                 errors="replace",
                 bufsize=1,
                 startupinfo=startup_info,
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED,
             )
+            self.job = WindowsJob(self.process)
+            resume_process(self.process.pid)
         except (OSError, ValueError) as error:
-            self.process = None
+            if self.job is not None:
+                self.job.terminate()
+                self.job.close()
+                self.job = None
+            if self.process is not None:
+                if self.process.poll() is None:
+                    self.process.kill()
+                self.process.wait()
+                self.process = None
             self._show_error(str(error))
             return
 
-        try:
-            self.job = WindowsJob(self.process)
-        except OSError:
-            self.job = None
         self.operation = operation
         self.stop_requested = False
         self.run_id += 1
@@ -279,13 +335,10 @@ class ImageBookLauncher(tk.Tk):
                 timeout=15,
                 check=False,
             )
-            if result.returncode != 0 and process.poll() is None:
-                process.kill()
-                self.events.put(("log", "Windows 未能终止整个进程树，已强制终止主进程。"))
+            if result.returncode != 0:
+                self.events.put(("stop_error", process, "Windows 未能停止整个进程树，请重试。"))
         except (OSError, subprocess.TimeoutExpired):
-            if process.poll() is None:
-                process.kill()
-                self.events.put(("log", "停止进程树失败，已强制终止主进程。"))
+            self.events.put(("stop_error", process, "停止进程树失败，请重试。"))
 
     def _drain_events(self):
         for _ in range(200):
@@ -304,6 +357,15 @@ class ImageBookLauncher(tk.Tk):
                     self.status_var.set(f"服务运行中：{self.service_url}")
                     self._append_log("服务已就绪，正在打开网页。")
                     webbrowser.open(self.service_url)
+            elif kind == "stop_error":
+                _, process, message = event
+                if process is self.process:
+                    self.stop_requested = False
+                    self.closing = False
+                    self.status_var.set("停止失败，请重试")
+                    self._append_log(message)
+                    self._update_buttons()
+                    messagebox.showerror(APP_NAME, message, parent=self)
             elif kind == "timeout":
                 _, process, run_id = event
                 if process is self.process and run_id == self.run_id and not self.stop_requested:
